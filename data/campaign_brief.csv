@@ -1,0 +1,6 @@
+campaign_id,campaign_name,brief,campaign_type,cta,created_date
+C001,Inactive Users Re-Engagement,Send an email to all inactive users offering a 10% discount,Win-back,Come back and save 10%!,2025-01-11 00:00:00
+C002,Holiday Promotion 2025,Announce holiday discounts to all active users,Promotion,Shop Now!,2025-10-20 00:00:00
+C003,New Collection Launch,Introduce new product line to VIP customers,Product Launch,Explore Now,09-15-2025
+C004,Feedback Campaign,Request feedback from recent purchasers,Survey,Share Your Thoughts,2025-05-08 00:00:00
+C005,Abandoned Cart Reminder,Send reminder to users with items left in cart,Re-activation,Complete Your Purchase,2025-09-11 00:00:00
