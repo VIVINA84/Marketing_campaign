@@ -946,7 +946,39 @@ def reports_page():
             else:
                 rows = [(k, v) for k, v in summary.items() if not isinstance(v, (dict, list))]
                 if rows:
-                    st.table(pd.DataFrame(rows, columns=["Metric", "Value"]))
+                    # Map keys to friendly labels
+                    label_map = {
+                        "campaign_id": "Campaign ID",
+                        "total_variants": "Total Variants",
+                        "best_variant": "Best Variant",
+                        "best_open_rate": "Best Open Rate",
+                        "total_sent": "Total Sent",
+                        "total_opened": "Total Opened",
+                        "total_clicked": "Total Clicked",
+                        "overall_open_rate": "Overall Open Rate",
+                        "overall_click_rate": "Overall Click Rate",
+                    }
+
+                    items = [(label_map.get(k, k.replace('_', ' ').title()), v) for k, v in rows]
+
+                    # Render items in rows of up to 4 columns for a cleaner UI
+                    for i in range(0, len(items), 4):
+                        chunk = items[i:i+4]
+                        cols = st.columns(len(chunk))
+                        for col, (label, val) in zip(cols, chunk):
+                            display_val = "" if val is None else val
+                            if isinstance(display_val, (int, float)) and not isinstance(display_val, bool):
+                                # Format percentage-like metrics where appropriate
+                                if "rate" in label.lower() or "open" in label.lower() or "click" in label.lower():
+                                    try:
+                                        col.metric(label, f"{float(display_val):.2f}%")
+                                    except Exception:
+                                        col.metric(label, display_val)
+                                else:
+                                    col.metric(label, display_val)
+                            else:
+                                col.markdown(f"**{label}**")
+                                col.write(str(display_val))
         else:
             st.error(summary.get("error", "Report not found"))
 
