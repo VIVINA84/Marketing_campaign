@@ -34,6 +34,47 @@ def _safe_rate(numer: float, denom: float) -> float:
     return round((numer / denom * 100.0) if denom else 0.0, 2)
 
 
+def _ensure_str_list(value: Any) -> list:
+    """Coerce various input shapes into a list of strings.
+
+    Handles: None, list[str], str (possibly JSON or newline-separated), dict -> flattened key:value lines.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v) for v in value if v is not None]
+    if isinstance(value, dict):
+        items = []
+        for k, v in value.items():
+            if isinstance(v, (list, dict)):
+                items.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
+            else:
+                items.append(f"{k}: {v}")
+        return items
+    if isinstance(value, str):
+        s = value.strip()
+        # Try JSON
+        try:
+            parsed = json.loads(s)
+            return _ensure_str_list(parsed)
+        except Exception:
+            # Split on newlines, numbered lists, or semicolons
+            lines = [ln.strip().lstrip('-•*0123456789. ') for ln in s.splitlines() if ln.strip()]
+            if len(lines) > 1:
+                return lines
+            return [s]
+    # Fallback
+    return [str(value)]
+
+
+def _join_as_bullets(value: Any) -> str:
+    """Return a newline-joined bullet string for the given value."""
+    parts = _ensure_str_list(value)
+    if not parts:
+        return ""
+    return "\n".join(parts)
+
+
 def build_campaign_payload(campaign_state: Dict[str, Any], global_stats_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     """
     Normalize data needed for the final report.
@@ -108,8 +149,8 @@ def call_llm_for_insights(payload: Dict[str, Any]) -> LLMResult:
             executive_summary="Executive summary unavailable (no LLM key configured). Overall performance summarized by totals.",
             performance_analysis="Variant comparison suggests opportunities to optimize subject lines and CTAs.",
             deliverability_assessment="Review sender reputation, authentication, and content signals.",
-            recommendations="1) Test subject lines\n2) Improve preheaders\n3) Tighten audience hygiene\n4) Iterate on CTA placement.",
-            next_steps="Day 1: Clean list\nDay 2-3: Create A/B subject tests\nDay 4: Template improvements\nDay 5-7: Send, monitor, iterate.",
+            recommendations=_join_as_bullets("1) Test subject lines\n2) Improve preheaders\n3) Tighten audience hygiene\n4) Iterate on CTA placement."),
+            next_steps=_join_as_bullets("Day 1: Clean list\nDay 2-3: Create A/B subject tests\nDay 4: Template improvements\nDay 5-7: Send, monitor, iterate."),
         )
 
     try:
@@ -135,20 +176,27 @@ def call_llm_for_insights(payload: Dict[str, Any]) -> LLMResult:
         try:
             parsed = json.loads(text)
         except Exception:
-            # If the model returned text not JSON, make a best-effort extraction
+            # If the model returned text not JSON, use raw text as the executive summary
             parsed = {
-                "executive_summary": text[:1000],
+                "executive_summary": text[:2000],
                 "performance_analysis": "",
                 "deliverability_assessment": "",
                 "recommendations": "",
                 "next_steps": "",
             }
+        # Normalize fields to strings (bullet-joint where appropriate)
+        exec_sum = parsed.get("executive_summary", "")
+        perf = parsed.get("performance_analysis", "")
+        deliver = parsed.get("deliverability_assessment", "")
+        recs = _join_as_bullets(parsed.get("recommendations", ""))
+        steps = _join_as_bullets(parsed.get("next_steps", ""))
+
         return LLMResult(
-            executive_summary=parsed.get("executive_summary", ""),
-            performance_analysis=parsed.get("performance_analysis", ""),
-            deliverability_assessment=parsed.get("deliverability_assessment", ""),
-            recommendations=parsed.get("recommendations", ""),
-            next_steps=parsed.get("next_steps", ""),
+            executive_summary=exec_sum if isinstance(exec_sum, str) else (json.dumps(exec_sum, ensure_ascii=False) if exec_sum is not None else ""),
+            performance_analysis=perf if isinstance(perf, str) else (json.dumps(perf, ensure_ascii=False) if perf is not None else ""),
+            deliverability_assessment=deliver if isinstance(deliver, str) else (json.dumps(deliver, ensure_ascii=False) if deliver is not None else ""),
+            recommendations=recs,
+            next_steps=steps,
         )
     except Exception:
         return LLMResult(
@@ -247,11 +295,21 @@ def _render_reportlab_pdf(payload: Dict[str, Any], llm: LLMResult, pdf_path: str
             story.append(Spacer(1, 12))
 
     story.append(Paragraph("Recommendations", styles['Heading2']))
-    story.append(Paragraph((llm.recommendations or 'N/A').replace('\n', '<br/>'), styles['BodyText']))
+    if llm.recommendations:
+        for line in llm.recommendations.splitlines():
+            if line.strip():
+                story.append(Paragraph(f"• {line.strip()}", styles['BodyText']))
+    else:
+        story.append(Paragraph('N/A', styles['BodyText']))
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("Next Steps", styles['Heading2']))
-    story.append(Paragraph((llm.next_steps or 'N/A').replace('\n', '<br/>'), styles['BodyText']))
+    if llm.next_steps:
+        for line in llm.next_steps.splitlines():
+            if line.strip():
+                story.append(Paragraph(f"• {line.strip()}", styles['BodyText']))
+    else:
+        story.append(Paragraph('N/A', styles['BodyText']))
 
     doc.build(story)
 
@@ -265,6 +323,15 @@ def generate_pdf_report(campaign_state: Dict[str, Any], results_dir: str, global
     os.makedirs(results_dir, exist_ok=True)
     payload = build_campaign_payload(campaign_state, global_stats_df)
     llm = call_llm_for_insights(payload)
+
+    # If LLM didn't return recommendations/next_steps, fall back to any existing report content
+    report_section = campaign_state.get('campaign_report', {}) or {}
+    if not llm.recommendations:
+        if report_section.get('recommendations'):
+            llm.recommendations = _join_as_bullets(report_section.get('recommendations'))
+    if not llm.next_steps:
+        if report_section.get('next_steps'):
+            llm.next_steps = _join_as_bullets(report_section.get('next_steps'))
 
     # Output path
     campaign_id = campaign_state.get("campaign_id", "unknown")
