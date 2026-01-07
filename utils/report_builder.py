@@ -75,6 +75,87 @@ def _join_as_bullets(value: Any) -> str:
     return "\n".join(parts)
 
 
+def _format_value_plain(value: Any, indent: int = 0) -> str:
+    """Format dict/list/primitive into clean plain text with indentation.
+
+    - dict -> lines of `key:` and indented values
+    - list -> `- item` lines (recursively formatted if nested)
+    - primitive -> string value
+    """
+    pad = "  " * indent
+    lines = []
+
+    if value is None:
+        return ""
+
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(v, (dict, list)):
+                lines.append(f"{pad}{k}:")
+                sub = _format_value_plain(v, indent + 1)
+                if sub:
+                    lines.append(sub)
+            else:
+                lines.append(f"{pad}{k}: {v}")
+        return "\n".join(lines)
+
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                lines.append(f"{pad}-")
+                sub = _format_value_plain(item, indent + 1)
+                if sub:
+                    lines.append(sub)
+            else:
+                lines.append(f"{pad}- {item}")
+        return "\n".join(lines)
+
+    # Primitive
+    return f"{pad}{value}"
+
+
+escape_map = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+}
+
+
+def _escape_html(text: str) -> str:
+    out = text or ""
+    for k, v in escape_map.items():
+        out = out.replace(k, v)
+    return out
+
+
+def _to_paragraph_text(text: str) -> str:
+    """Escape HTML and convert newlines to <br/> for ReportLab Paragraph."""
+    return _escape_html(text or "").replace("\n", "<br/>")
+
+
+def _format_text_section(value: Any) -> str:
+    """Return a clean plain-text section string from possibly JSON-like input.
+
+    If `value` is a string containing JSON, parse and pretty-format it.
+    If it's already a dict/list, format directly. Otherwise return the string.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return _format_value_plain(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return ""
+        # Try to parse JSON and pretty-print if it works
+        try:
+            parsed = json.loads(s)
+            return _format_value_plain(parsed)
+        except Exception:
+            return s
+    return str(value)
+
+
 def build_campaign_payload(campaign_state: Dict[str, Any], global_stats_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     """
     Normalize data needed for the final report.
@@ -184,17 +265,17 @@ def call_llm_for_insights(payload: Dict[str, Any]) -> LLMResult:
                 "recommendations": "",
                 "next_steps": "",
             }
-        # Normalize fields to strings (bullet-joint where appropriate)
-        exec_sum = parsed.get("executive_summary", "")
-        perf = parsed.get("performance_analysis", "")
-        deliver = parsed.get("deliverability_assessment", "")
+        # Normalize fields into clean plain text (indent lists/dicts)
+        exec_sum_raw = parsed.get("executive_summary", "")
+        perf_raw = parsed.get("performance_analysis", "")
+        deliver_raw = parsed.get("deliverability_assessment", "")
         recs = _join_as_bullets(parsed.get("recommendations", ""))
         steps = _join_as_bullets(parsed.get("next_steps", ""))
 
         return LLMResult(
-            executive_summary=exec_sum if isinstance(exec_sum, str) else (json.dumps(exec_sum, ensure_ascii=False) if exec_sum is not None else ""),
-            performance_analysis=perf if isinstance(perf, str) else (json.dumps(perf, ensure_ascii=False) if perf is not None else ""),
-            deliverability_assessment=deliver if isinstance(deliver, str) else (json.dumps(deliver, ensure_ascii=False) if deliver is not None else ""),
+            executive_summary=_format_text_section(exec_sum_raw),
+            performance_analysis=_format_text_section(perf_raw),
+            deliverability_assessment=_format_text_section(deliver_raw),
             recommendations=recs,
             next_steps=steps,
         )
@@ -221,7 +302,7 @@ def _render_reportlab_pdf(payload: Dict[str, Any], llm: LLMResult, pdf_path: str
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("Executive Summary", styles['Heading2']))
-    story.append(Paragraph(llm.executive_summary or 'N/A', styles['BodyText']))
+    story.append(Paragraph(_to_paragraph_text(llm.executive_summary or 'N/A'), styles['BodyText']))
     story.append(Spacer(1, 12))
 
     totals = payload.get('totals', {}) or {}
@@ -270,11 +351,11 @@ def _render_reportlab_pdf(payload: Dict[str, Any], llm: LLMResult, pdf_path: str
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("Performance Analysis", styles['Heading2']))
-    story.append(Paragraph(llm.performance_analysis or 'N/A', styles['BodyText']))
+    story.append(Paragraph(_to_paragraph_text(llm.performance_analysis or 'N/A'), styles['BodyText']))
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("Deliverability Assessment", styles['Heading2']))
-    story.append(Paragraph(llm.deliverability_assessment or 'N/A', styles['BodyText']))
+    story.append(Paragraph(_to_paragraph_text(llm.deliverability_assessment or 'N/A'), styles['BodyText']))
     story.append(Spacer(1, 12))
 
     # Provider global stats summary
@@ -345,6 +426,76 @@ def generate_pdf_report(campaign_state: Dict[str, Any], results_dir: str, global
 
     # Fallback: create a minimal HTML if ReportLab is not available
     html_path = os.path.join(report_dir, f"final_report_{campaign_id}.html")
+
+    def _build_plain_text_report(payload: Dict[str, Any], llm: LLMResult, global_df: Optional[pd.DataFrame]) -> str:
+        lines = []
+        lines.append(f"Campaign Report: {payload.get('campaign_name')} ({payload.get('campaign_id')})")
+        lines.append(f"Generated: {payload.get('generated_at')}")
+        lines.append("")
+        lines.append("Executive Summary")
+        lines.append("-------------------")
+        lines.append(_format_text_section(llm.executive_summary) or "N/A")
+        lines.append("")
+
+        totals = payload.get('totals', {}) or {}
+        lines.append("Key Metrics")
+        lines.append("-----------")
+        lines.append(f"Sent: {totals.get('sent', 0)}")
+        lines.append(f"Opened: {totals.get('opened', 0)}")
+        lines.append(f"Open Rate: {totals.get('open_rate', 0)}%")
+        lines.append(f"Clicked: {totals.get('clicked', 0)}")
+        lines.append(f"Click Rate: {totals.get('click_rate', 0)}%")
+        lines.append(f"Bounced: {totals.get('bounced', 0)}")
+        lines.append(f"Bounce Rate: {totals.get('bounce_rate', 0)}%")
+        lines.append("")
+
+        ab = payload.get('ab_results', {}) or {}
+        if ab:
+            lines.append("Variant Comparison")
+            lines.append("-------------------")
+            for v, m in ab.items():
+                lines.append(f"{v}:")
+                lines.append(f"  Sent: {m.get('sent', 0)}")
+                lines.append(f"  Opened: {m.get('opened', 0)}")
+                lines.append(f"  Clicked: {m.get('clicked', 0)}")
+                lines.append(f"  Open Rate: {m.get('open_rate', 0)}%")
+                lines.append(f"  Click Rate: {m.get('click_rate', 0)}%")
+                lines.append(f"  Bounced: {m.get('bounced', 0)}")
+            lines.append("")
+
+        lines.append("Performance Analysis")
+        lines.append("---------------------")
+        lines.append(_format_text_section(llm.performance_analysis) or "N/A")
+        lines.append("")
+
+        lines.append("Deliverability Assessment")
+        lines.append("--------------------------")
+        lines.append(_format_text_section(llm.deliverability_assessment) or "N/A")
+        lines.append("")
+
+        lines.append("Recommendations")
+        lines.append("----------------")
+        if llm.recommendations:
+            for line in llm.recommendations.splitlines():
+                if line.strip():
+                    lines.append(f"- {line.strip()}")
+        else:
+            lines.append("N/A")
+        lines.append("")
+
+        lines.append("Next Steps")
+        lines.append("----------")
+        if llm.next_steps:
+            for line in llm.next_steps.splitlines():
+                if line.strip():
+                    lines.append(f"- {line.strip()}")
+        else:
+            lines.append("N/A")
+        lines.append("")
+
+        return "\n".join(lines)
+
+    text_body = _build_plain_text_report(payload, llm, global_stats_df)
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write("<html><body><pre>" + json.dumps({"payload": payload, "insights": llm.__dict__}, ensure_ascii=False, indent=2) + "</pre></body></html>")
+        f.write("<html><body><pre>" + _escape_html(text_body) + "</pre></body></html>")
     return html_path
